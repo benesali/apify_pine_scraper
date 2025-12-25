@@ -12,6 +12,7 @@ yarn-error.log*
 output/
 dist/
 .apify_storage/
+storage/ 
 
 # Playwright
 .playwright/

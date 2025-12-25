@@ -1,83 +1,177 @@
 import { PlaywrightCrawler } from 'crawlee';
 import fs from 'fs-extra';
 import path from 'path';
-import slugify from 'slugify';
-import sharp from 'sharp';
+import crypto from 'crypto';
 
+/* =========================
+   CONFIG
+========================= */
 const OUTPUT_DIR = './output';
+await fs.ensureDir(OUTPUT_DIR);
 
-const crawler = new PlaywrightCrawler({
-    maxRequestsPerCrawl: 100,
-    async requestHandler({ page, request, enqueueLinks }) {
-        const url = request.url;
-        const slug = slugify(new URL(url).pathname.replace(/\//g, ' '), {
-            lower: true,
-            strict: true
-        });
+/**
+ * Order of galleries on:
+ * https://www.pinetreedalmatia.cz/apartmany-srima-1
+ */
+const GALLERY_ORDER = [
+  'general',
+  'mayer',
+  'tea',
+  'dario',
+  'pine-tree'
+];
 
-        const pageDir = path.join(OUTPUT_DIR, slug || 'home');
-        const imagesDir = path.join(pageDir, 'images');
+const MAX_NAVIGATION_STEPS = 60;
 
-        await fs.ensureDir(imagesDir);
+/* =========================
+   HELPERS
+========================= */
+function detectLocation(url) {
+  if (url.includes('srima')) return 'srima';
+  if (url.includes('vodice')) return 'vodice';
+  if (url.includes('kastel')) return 'kastela';
+  if (url.includes('sibenik')) return 'sibenik';
+  return 'other';
+}
 
-        const title = await page.title();
-        const h1 = await page.$eval('h1', el => el.innerText).catch(() => null);
-        const description = await page.$eval(
-            'meta[name="description"]',
-            el => el.content
-        ).catch(() => null);
+function toHighQualityWix(url) {
+  // enforce large image size
+  return url.replace(
+    /\/v1\/fill\/.*?\//,
+    '/v1/fill/w_3000,h_3000,q_95/'
+  );
+}
 
-        const bodyText = await page.evaluate(() => document.body.innerText);
+function hashUrl(url) {
+  return crypto.createHash('sha1').update(url).digest('hex').slice(0, 10);
+}
 
-        // Heuristika apartmánu
-        const apartmentSignals = ['apartment', 'apartman', 'bedroom', 'guests', 'terrace', 'm²'];
-        const isApartment = apartmentSignals.some(s =>
-            bodyText.toLowerCase().includes(s)
-        );
+/* =========================
+   EXTRACT
+========================= */
+async function extract(page, url) {
+  const location = detectLocation(url);
 
-        // --- ULOŽ META ---
-        await fs.writeJson(
-            path.join(pageDir, 'meta.json'),
-            { url, title, h1, description, isApartment },
-            { spaces: 2 }
-        );
+  const gallerySelector = '.pro-gallery.thumbnails-gallery';
+  const galleryCount = await page.locator(gallerySelector).count();
 
-        // --- ULOŽ TEXT ---
-        await fs.writeFile(
-            path.join(pageDir, 'text.md'),
-            bodyText
-        );
+  console.log(`🧩 Found ${galleryCount} galleries`);
 
-        // --- STÁHNI A OPTIMALIZUJ OBRÁZKY ---
-        const images = await page.$$eval('img', imgs =>
-            imgs.map(img => img.src).filter(src => src.startsWith('http'))
-        );
+  for (let i = 0; i < galleryCount; i++) {
+    const apartment = GALLERY_ORDER[i] || `gallery-${i + 1}`;
 
-        let index = 1;
-        for (const imgUrl of images) {
-            try {
-                const res = await fetch(imgUrl);
-                const buffer = Buffer.from(await res.arrayBuffer());
+    const baseDir = path.join(
+      OUTPUT_DIR,
+      location,
+      apartment,
+      'original'
+    );
+    await fs.ensureDir(baseDir);
 
-                const fileName = `image-${index}.webp`;
-                await sharp(buffer)
-                    .resize(2000)
-                    .webp({ quality: 80 })
-                    .toFile(path.join(imagesDir, fileName));
+    console.log(`📸 Gallery ${i + 1} → ${apartment}`);
 
-                index++;
-            } catch {
-                // ignoruj rozbité obrázky
-            }
-        }
+    const seen = new Set();
+    const collected = [];
 
-        await enqueueLinks({
-            sameDomain: true
-        });
+    /* 🔥 sniffer only for THIS gallery */
+    const onResponse = response => {
+      const u = response.url();
+      if (
+        u.includes('static.wixstatic.com/media') &&
+        u.includes('~mv2') &&
+        !seen.has(u)
+      ) {
+        seen.add(u);
+        collected.push(u);
+      }
+    };
+
+    page.on('response', onResponse);
+
+    /* ⚠️ DO NOT reuse element handles */
+    const gallery = page.locator(gallerySelector).nth(i);
+    const firstThumb = gallery.locator('div.thumbnailItem').first();
+
+    if (!(await firstThumb.count())) {
+      console.log('   ↳ no thumbnails, skip');
+      page.off('response', onResponse);
+      continue;
     }
+
+    await firstThumb.scrollIntoViewIfNeeded();
+    await firstThumb.click({ force: true });
+    await page.waitForTimeout(1500);
+
+    /* ▶️ navigate gallery */
+    for (let step = 0; step < MAX_NAVIGATION_STEPS; step++) {
+      await page.keyboard.press('ArrowRight');
+      await page.waitForTimeout(350);
+    }
+
+    /* ❌ close viewer */
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(1500);
+
+    page.off('response', onResponse);
+
+    if (collected.length === 0) {
+      console.log('   ↳ sniffed 0 images (gallery reused / skipped)');
+      continue;
+    }
+
+    console.log(`   ↳ sniffed ${collected.length} images`);
+
+    /* ⬇️ DOWNLOAD */
+    for (const src of collected) {
+      try {
+        const hqUrl = toHighQualityWix(src);
+        const hash = hashUrl(hqUrl);
+
+        const res = await page.request.get(hqUrl);
+        if (!res.ok()) continue;
+
+        const buffer = Buffer.from(await res.body());
+        if (buffer.length < 1500) continue;
+
+        const ct = res.headers()['content-type'] || '';
+        let ext = 'bin';
+        if (ct.includes('avif')) ext = 'avif';
+        else if (ct.includes('webp')) ext = 'webp';
+        else if (ct.includes('jpeg')) ext = 'jpg';
+
+        const filePath = path.join(
+          baseDir,
+          `${location}-${apartment}-${hash}.${ext}`
+        );
+
+        if (await fs.pathExists(filePath)) continue;
+
+        await fs.writeFile(filePath, buffer);
+        console.log(`💾 ${filePath}`);
+      } catch {
+        console.warn('❌ image failed');
+      }
+    }
+  }
+}
+
+/* =========================
+   CRAWLER
+========================= */
+const crawler = new PlaywrightCrawler({
+  maxConcurrency: 1,
+  requestHandlerTimeoutSecs: 600,
+
+  async requestHandler({ page, request }) {
+    console.log(`➡ Crawling ${request.url}`);
+    await page.waitForTimeout(3000);
+    await extract(page, request.url);
+  }
 });
 
+/* =========================
+   START
+========================= */
 await crawler.run([
-    'https://www.pinetreedalmatia.cz/pine-tree-apartments-srima-1',
-    'https://www.pinetreedalmatia.cz/vodice-apartmany-brunac'
+  'https://www.pinetreedalmatia.cz/apartmany-srima-1'
 ]);
