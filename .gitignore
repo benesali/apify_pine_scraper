@@ -3,6 +3,11 @@ node_modules/
 npm-debug.log*
 yarn-error.log*
 
+# formats
+*.webp
+*.jpg
+*.png
+
 # Build / output
 output/
 dist/
