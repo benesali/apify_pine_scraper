@@ -38,7 +38,7 @@ def convert_jpg_to_webp(
                     optimize=True,
                 )
 
-                print(f"OK {jpg_path.name} → {webp_path.name}")
+                print(f"OK {jpg_path.name} -> {webp_path.name}")
 
         except Exception as e:
             print(f"Error {jpg_path}: {e}")
