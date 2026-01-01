@@ -1,84 +1,123 @@
 #!/usr/bin/env python3
 import argparse
+import json
 from pathlib import Path
 from PIL import Image
 
 
-def convert_jpg_to_webp(
+def convert_images(
     input_dir: Path,
-    quality: int = 82,
-    max_size: int = 1920,
-    overwrite: bool = False,
+    output_dir: Path,
+    sizes: list[int],
+    quality: int,
+    overwrite: bool,
 ):
-    jpg_files = list(input_dir.rglob("*.jpg")) + list(input_dir.rglob("*.jpeg"))
+    jpg_files = sorted(
+        list(input_dir.rglob("*.jpg")) + list(input_dir.rglob("*.jpeg"))
+    )
 
     if not jpg_files:
-        print("No files to convert found.")
+        print("No JPG files found.")
         return
 
-    for jpg_path in jpg_files:
-        # base name without suffix
+    manifest = {
+        "main": None,
+        "gallery": [],
+    }
+
+    for index, jpg_path in enumerate(jpg_files):
+        rel_path = jpg_path.relative_to(input_dir)
+        out_dir = output_dir / rel_path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+
         base_name = jpg_path.stem
-        # new name with size suffix
-        webp_name = f"{base_name}-{max_size}.webp"
-        webp_path = jpg_path.with_name(webp_name)
+        logical_name = f"{base_name}.webp"
 
-        if webp_path.exists() and not overwrite:
-            print(f"webp exists: {webp_path}")
-            continue
+        if index == 0:
+            manifest["main"] = logical_name
+        else:
+            manifest["gallery"].append(logical_name)
 
-        try:
-            with Image.open(jpg_path) as img:
-                img = img.convert("RGB")
+        for size in sizes:
+            webp_name = f"{base_name}-{size}.webp"
+            webp_path = out_dir / webp_name
 
-                img.thumbnail((max_size, max_size), Image.LANCZOS)
+            if webp_path.exists() and not overwrite:
+                continue
 
-                img.save(
-                    webp_path,
-                    format="WEBP",
-                    quality=quality,
-                    method=6,
-                    optimize=True,
-                )
+            try:
+                with Image.open(jpg_path) as img:
+                    img = img.convert("RGB")
+                    img.thumbnail((size, size), Image.LANCZOS)
 
-                print(f"OK {jpg_path.name} -> {webp_path.name}")
+                    img.save(
+                        webp_path,
+                        format="WEBP",
+                        quality=quality,
+                        method=6,
+                        optimize=True,
+                    )
 
-        except Exception as e:
-            print(f"Error {jpg_path}: {e}")
+            except Exception as e:
+                print(f"Error {jpg_path}: {e}")
+
+    # write manifest
+    manifest_path = output_dir / "manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"✔ Manifest generated: {manifest_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Convert JPG images to WebP format with size suffix",
+        description="Generate responsive WebP images and manifest.json"
     )
+
     parser.add_argument(
-        "directory",
+        "input_dir",
         type=Path,
-        help="Folder with JPG images",
+        help="Source directory with JPG images",
     )
+
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Target directory for WebP images",
+    )
+
+    parser.add_argument(
+        "--sizes",
+        type=str,
+        default="640,1280",
+        help="Comma-separated image sizes (e.g. 640,1280)",
+    )
+
     parser.add_argument(
         "--quality",
         type=int,
         default=82,
         help="WebP quality (0–100)",
     )
-    parser.add_argument(
-        "--max-size",
-        type=int,
-        default=1920,
-        help="Max size (px) – also added to filename",
-    )
+
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite existing .webp files",
+        help="Overwrite existing WebP files",
     )
 
     args = parser.parse_args()
 
-    convert_jpg_to_webp(
-        input_dir=args.directory,
+    sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip().isdigit()]
+
+    if not sizes:
+        raise ValueError("At least one valid size must be provided.")
+
+    convert_images(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        sizes=sizes,
         quality=args.quality,
-        max_size=args.max_size,
         overwrite=args.overwrite,
     )
