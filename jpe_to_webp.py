@@ -66,7 +66,7 @@ def convert_images(
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"✔ Manifest generated: {manifest_path}")
+    print(f"Manifest generated: {manifest_path}")
 
 
 if __name__ == "__main__":

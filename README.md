@@ -10,5 +10,10 @@ python generate_alt_apartments.py (--dry-run for debug)
     for rooms, you have to rename manually
 
 
-python jpg_to_webp.py ./images (optional) --quality 80 (optional) --max-size 1600
+python jpe_to_webp.py initial_dir_jpeg \
+  --output-dir public/images/ \
+  --sizes 640,1280
+
     converts jpg/jpeg to webpy - web friendly fromat 
+    generates multiple web friendly sizes
+    geenrates manifest with naming
